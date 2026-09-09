@@ -1,0 +1,1666 @@
+package com.example.uhqrelation
+
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.media.RingtoneManager
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.zIndex
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.navigation.NavController
+import coil.compose.AsyncImage
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentChange
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+
+/**
+ * Responsive white center wave used behind the UHQ RELATION logo.
+ * It is drawn as a real Shape instead of a fixed rectangular Box so the
+ * proportions stay consistent on narrow and wide Android screens.
+ */
+private class LogoWhiteWaveShape : Shape {
+    override fun createOutline(
+        size: Size,
+        layoutDirection: LayoutDirection,
+        density: androidx.compose.ui.unit.Density
+    ): androidx.compose.ui.graphics.Outline {
+        val w = size.width
+        val h = size.height
+
+        val path = Path().apply {
+            // Start at the upper-left of the white center panel.
+            moveTo(w * 0.08f, 0f)
+
+            // Soft downward curve into the center.
+            cubicTo(
+                w * 0.20f, h * 0.22f,
+                w * 0.32f, h * 0.30f,
+                w * 0.50f, h * 0.32f
+            )
+
+            // Mirror the curve toward the upper-right.
+            cubicTo(
+                w * 0.68f, h * 0.30f,
+                w * 0.80f, h * 0.22f,
+                w * 0.92f, 0f
+            )
+
+            // Right side and rounded lower corners.
+            lineTo(w, 0f)
+            lineTo(w, h * 0.72f)
+            cubicTo(w, h * 0.90f, w * 0.90f, h, w * 0.76f, h)
+            lineTo(w * 0.24f, h)
+            cubicTo(w * 0.10f, h, 0f, h * 0.90f, 0f, h * 0.72f)
+            lineTo(0f, 0f)
+            close()
+        }
+
+        return androidx.compose.ui.graphics.Outline.Generic(path)
+    }
+}
+
+data class HomeGridItem(
+    val name: String,
+    val subtitle: String,
+    val iconVector: ImageVector? = null,
+    val iconRes: Int? = null,
+    val color: Color,
+    val cardStart: Color,
+    val cardEnd: Color
+)
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun HomeScreen(navController: NavController, initialTab: String, activity: MainActivity) {
+    val auth = FirebaseAuth.getInstance()
+    val uid = auth.currentUser?.uid
+
+    var selectedTab by rememberSaveable { mutableStateOf(initialTab) }
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    var showSearchOverlay by remember { mutableStateOf(false) }
+
+    // Existing back behavior preserved.
+    BackHandler {
+        if (showSearchOverlay) {
+            showSearchOverlay = false
+        } else {
+            (context as? Activity)?.finishAffinity()
+        }
+    }
+
+    // Existing state/backend variables preserved.
+    var banners by remember { mutableStateOf<List<BannerModel>>(emptyList()) }
+    var isBannerLoading by remember { mutableStateOf(true) }
+    var userName by remember { mutableStateOf(globalUserName.ifEmpty { "..." }) }
+
+    var popupVisible by remember { mutableStateOf(false) }
+    var latestAppNotif by remember { mutableStateOf<NotificationModel?>(null) }
+    var isFlyingToBell by remember { mutableStateOf(false) }
+
+    var hiddenNotifIds by remember { mutableStateOf(setOf<String>()) }
+    var globalNotifCount by remember { mutableIntStateOf(0) }
+    var userNotifCount by remember { mutableIntStateOf(0) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hiddenNotifIds = context
+                    .getSharedPreferences("UHQ_NOTIFS", Context.MODE_PRIVATE)
+                    .getStringSet("hidden_notifs", emptySet()) ?: emptySet()
+            }
+        }
+
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    AppUpdateChecker()
+
+    // Existing Firestore/backend logic preserved.
+    DisposableEffect(uid) {
+        val firestoreDb = FirebaseFirestore.getInstance()
+
+        val userListener = uid?.let {
+            firestoreDb.collection("Users").document(it)
+                .addSnapshotListener { snapshot, error ->
+                    if (error == null && snapshot != null && snapshot.exists()) {
+                        val fullName = snapshot.getString("name") ?: "User"
+                        userName = fullName
+                        globalUserName = fullName
+                    }
+                }
+        }
+
+        val bannerListener = firestoreDb.collection("AppBanners")
+            .addSnapshotListener { snapshot, _ ->
+                if (snapshot != null) {
+                    banners = snapshot.documents.mapNotNull {
+                        it.toObject(BannerModel::class.java)
+                    }
+                }
+                isBannerLoading = false
+            }
+
+        var isGlobalInitial = true
+
+        val globalNotifListener = firestoreDb.collection("AppNotifications")
+            .orderBy("timestamp", Query.Direction.DESCENDING)
+            .limit(30)
+            .addSnapshotListener { snapshot, error ->
+                if (error == null && snapshot != null && !snapshot.isEmpty) {
+                    globalNotifCount =
+                        snapshot.documents.count { !hiddenNotifIds.contains(it.id) }
+
+                    val isNewAddition = snapshot.documentChanges.any {
+                        it.type == DocumentChange.Type.ADDED
+                    }
+
+                    val newNotif =
+                        snapshot.documents[0].toObject(NotificationModel::class.java)
+
+                    if (newNotif != null &&
+                        !isGlobalInitial &&
+                        isNewAddition &&
+                        !popupVisible
+                    ) {
+                        latestAppNotif = newNotif
+                        popupVisible = true
+                        isFlyingToBell = false
+
+                        try {
+                            RingtoneManager.getRingtone(
+                                context,
+                                RingtoneManager.getDefaultUri(
+                                    RingtoneManager.TYPE_NOTIFICATION
+                                )
+                            ).play()
+                        } catch (_: Exception) {
+                        }
+
+                        try {
+                            triggerSystemNotification(
+                                context,
+                                newNotif.title,
+                                newNotif.message,
+                                newNotif.actionTarget
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }
+                } else { globalNotifCount = 0 }
+                isGlobalInitial = false
+            }
+
+        var isUserInitial = true
+
+        val userNotifListener = uid?.let { currentUid ->
+            firestoreDb.collection("Users")
+                .document(currentUid)
+                .collection("UserNotifications")
+                .orderBy("timestamp", Query.Direction.DESCENDING)
+                .addSnapshotListener { snapshot, error ->
+                    if (error == null && snapshot != null) {
+                        userNotifCount = snapshot.documents.size
+
+                        val hasChanges = snapshot.documentChanges.any {
+                            it.type == DocumentChange.Type.ADDED
+                        }
+
+                        if (!snapshot.isEmpty) {
+                            val newNotif =
+                                snapshot.documents[0].toObject(NotificationModel::class.java)
+
+                            if (newNotif != null &&
+                                !isUserInitial &&
+                                hasChanges &&
+                                !popupVisible
+                            ) {
+                                latestAppNotif = newNotif
+                                popupVisible = true
+                                isFlyingToBell = false
+
+                                try {
+                                    RingtoneManager.getRingtone(
+                                        context,
+                                        RingtoneManager.getDefaultUri(
+                                            RingtoneManager.TYPE_NOTIFICATION
+                                        )
+                                    ).play()
+                                } catch (_: Exception) {
+                                }
+
+                                try {
+                                    triggerSystemNotification(
+                                        context,
+                                        newNotif.title,
+                                        newNotif.message,
+                                        newNotif.actionTarget
+                                    )
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    } else { userNotifCount = 0 }
+                    isUserInitial = false
+                }
+        }
+
+        onDispose {
+            userListener?.remove()
+            bannerListener.remove()
+            globalNotifListener.remove()
+            userNotifListener?.remove()
+        }
+    }
+
+    LaunchedEffect(uid) {
+        if (uid != null) {
+            FirebaseFirestore.getInstance()
+                .collection("Users")
+                .document(uid)
+                .update("lastActive", System.currentTimeMillis())
+        }
+    }
+
+    // Existing banner auto-slide behavior preserved, with smoother animation.
+    val bannerPagerState = rememberPagerState(
+        pageCount = { if (banners.isEmpty()) 1 else banners.size }
+    )
+
+    LaunchedEffect(bannerPagerState, banners.size) {
+        if (banners.size > 1) {
+            while (true) {
+                delay(4000)
+
+                if (!bannerPagerState.isScrollInProgress) {
+                    val nextPage =
+                        (bannerPagerState.currentPage + 1) % banners.size
+
+                    bannerPagerState.animateScrollToPage(
+                        page = nextPage,
+                        animationSpec = tween(
+                            durationMillis = 900,
+                            easing = FastOutSlowInEasing
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    // 🔥 FIX: Removed all '\n' to ensure FULL NAMES are displayed 🔥
+    val gridItemsList = listOf(
+        HomeGridItem(
+            name = "Paid Courses",
+            subtitle = "Learn from experts",
+            iconVector = Icons.Default.School,
+            color = Color.White,
+            cardStart = Color(0xFFE1F0FF),
+            cardEnd = Color(0xFFB9DDFF)
+        ),
+        HomeGridItem(
+            name = "Free Courses",
+            subtitle = "Quality study material",
+            iconVector = Icons.Default.OndemandVideo,
+            color = Color.White,
+            cardStart = Color(0xFFDFFAF0),
+            cardEnd = Color(0xFFBCEFE0)
+        ),
+        HomeGridItem(
+            name = "Job Alerts",
+            subtitle = "Latest notifications",
+            iconVector = Icons.Default.NotificationsActive,
+            color = Color.White,
+            cardStart = Color(0xFFFFE9D9),
+            cardEnd = Color(0xFFFFD0B5)
+        ),
+        HomeGridItem(
+            name = "Latest Result",
+            subtitle = "Check your results",
+            iconRes = R.drawable.result,
+            color = Color.White,
+            cardStart = Color(0xFFFFDCE9),
+            cardEnd = Color(0xFFFFBFD5)
+        ),
+        HomeGridItem(
+            name = "Documents",
+            subtitle = "Syllabus, PDF, etc.",
+            iconRes = R.drawable.doc,
+            color = Color.White,
+            cardStart = Color(0xFFE9E0FF),
+            cardEnd = Color(0xFFD4C6FF)
+        ),
+        HomeGridItem(
+            name = "Books",
+            subtitle = "Read & prepare",
+            iconVector = Icons.Default.MenuBook,
+            color = Color.White,
+            cardStart = Color(0xFFE0F0FF),
+            cardEnd = Color(0xFFBBDFFF)
+        ),
+        HomeGridItem(
+            name = "Online Exam (CBT)",
+            subtitle = "Practice & improve",
+            iconVector = Icons.Default.Computer,
+            color = Color.White,
+            cardStart = Color(0xFFFFE0E0),
+            cardEnd = Color(0xFFFFC8C8)
+        ),
+        HomeGridItem(
+            name = "Age Calculator",
+            subtitle = "Calculate your age",
+            iconVector = Icons.Default.Calculate,
+            color = Color.White,
+            cardStart = Color(0xFFDFF9EE),
+            cardEnd = Color(0xFFBDEEDB)
+        ),
+        HomeGridItem(
+            name = "Previous Year",
+            subtitle = "Access past papers",
+            iconVector = Icons.Default.Update,
+            color = Color.White,
+            cardStart = Color(0xFFFFF2C9),
+            cardEnd = Color(0xFFFFE39A)
+        ),
+        HomeGridItem(
+            name = "Syllabus",
+            subtitle = "View complete syllabus",
+            iconVector = Icons.Default.Apps,
+            color = Color.White,
+            cardStart = Color(0xFFE8E0FF),
+            cardEnd = Color(0xFFD5C8FF)
+        )
+    )
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            gesturesEnabled = !showSearchOverlay,
+            drawerContent = {
+                SidebarContent(
+                    auth,
+                    navController,
+                    selectedTab,
+                    { selectedTab = it },
+                    { coroutineScope.launch { drawerState.close() } }
+                )
+            }
+        ) {
+            Scaffold(
+                containerColor = Color.Transparent,
+
+                topBar = {
+                    PremiumHomeTopBar(
+                        userName = userName,
+                        totalActiveNotifs = globalNotifCount + userNotifCount,
+                        onMenuClick = {
+                            coroutineScope.launch { drawerState.open() }
+                        },
+                        onNotificationClick = {
+                            navController.navigate("notification_screen") {
+                                launchSingleTop = true
+                            }
+                        },
+                        onSearchClick = {
+                            showSearchOverlay = true
+                        }
+                    )
+                },
+
+                bottomBar = {
+                    PremiumBottomBar(
+                        selectedTab = selectedTab,
+                        hasNotification = (globalNotifCount + userNotifCount) > 0,
+                        onTabSelected = { selectedTab = it }
+                    )
+                }
+            ) { padding ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color(0xFFF5FAFF),
+                                    Color(0xFFEAF4FF)
+                                )
+                            )
+                        )
+                ) {
+                    when (selectedTab) {
+                        "Home" -> {
+                            HomeDashboard(
+                                userName = userName,
+                                banners = banners,
+                                isBannerLoading = isBannerLoading,
+                                bannerPagerState = bannerPagerState,
+                                gridItemsList = gridItemsList,
+                                navController = navController,
+                                onSearchClick = { showSearchOverlay = true }
+                            )
+                        }
+
+                        "Updates" -> {
+                            UserUpdateScreen(navController)
+                        }
+
+                        "Downloads" -> {
+                            DownloadsSection(
+                                navController,
+                                auth,
+                                title = "Your Downloads",
+                                emptyMessage = "No Downloads Available.",
+                                isPurchasesTab = false
+                            )
+                        }
+
+                        "Purchases" -> {
+                            DownloadsSection(
+                                navController = navController,
+                                auth = auth,
+                                title = "Your Purchases",
+                                emptyMessage = "No Purchases Right Now.",
+                                isPurchasesTab = true,
+                                onRedirectClick = {
+                                    selectedTab = "Downloads"
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Existing search overlay preserved.
+        AnimatedVisibility(
+            visible = showSearchOverlay,
+            enter = fadeIn(animationSpec = tween(300)),
+            exit = fadeOut(animationSpec = tween(300))
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.6f))
+                    .pointerInput(Unit) {
+                        detectTapGestures { }
+                    }
+                    .zIndex(200f)
+            ) {
+                SearchBoxScreen(
+                    navController = navController,
+                    onClose = { showSearchOverlay = false }
+                )
+            }
+        }
+
+        // Existing notification popup/animation preserved.
+        if (popupVisible && latestAppNotif != null) {
+            val scale by animateFloatAsState(
+                targetValue = if (isFlyingToBell) 0.05f else 1f,
+                animationSpec = tween(
+                    durationMillis = 700,
+                    easing = FastOutSlowInEasing
+                ),
+                label = "notification_scale"
+            )
+
+            val translationX by animateFloatAsState(
+                targetValue = if (isFlyingToBell) 420f else 0f,
+                animationSpec = tween(
+                    durationMillis = 700,
+                    easing = FastOutSlowInEasing
+                ),
+                label = "notification_translation_x"
+            )
+
+            val translationY by animateFloatAsState(
+                targetValue = if (isFlyingToBell) -950f else 0f,
+                animationSpec = tween(
+                    durationMillis = 700,
+                    easing = FastOutSlowInEasing
+                ),
+                label = "notification_translation_y"
+            )
+
+            val rotationZ by animateFloatAsState(
+                targetValue = if (isFlyingToBell) 25f else 0f,
+                animationSpec = tween(
+                    durationMillis = 700,
+                    easing = FastOutSlowInEasing
+                ),
+                label = "notification_rotation"
+            )
+
+            val alpha by animateFloatAsState(
+                targetValue = if (isFlyingToBell) 0f else 1f,
+                animationSpec = tween(700),
+                label = "notification_alpha"
+            )
+
+            val bgAlpha by animateFloatAsState(
+                targetValue = if (isFlyingToBell) 0f else 0.55f,
+                animationSpec = tween(500),
+                label = "notification_bg_alpha"
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = bgAlpha))
+                    .zIndex(100f),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    modifier = Modifier
+                        .padding(24.dp)
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = translationX,
+                            translationY = translationY,
+                            rotationZ = rotationZ,
+                            alpha = alpha
+                        ),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.White
+                    ),
+                    elevation = CardDefaults.cardElevation(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .padding(20.dp)
+                            .fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        if (latestAppNotif!!.type == "TicketReply") {
+                                            Color(0xFFE8F5E9)
+                                        } else {
+                                            Color(0xFFFFF3E0)
+                                        },
+                                        CircleShape
+                                    )
+                                    .padding(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector =
+                                        if (latestAppNotif!!.type == "TicketReply") {
+                                            Icons.Default.ConfirmationNumber
+                                        } else {
+                                            Icons.Default.NotificationsActive
+                                        },
+                                    contentDescription = null,
+                                    tint =
+                                        if (latestAppNotif!!.type == "TicketReply") {
+                                            Color(0xFF2E7D32)
+                                        } else {
+                                            Color(0xFFF57C00)
+                                        },
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Text(
+                                text = latestAppNotif!!.title,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 17.sp,
+                                fontFamily = Poppins,
+                                color = Color(0xFF1E293B)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Text(
+                            text = latestAppNotif!!.message,
+                            fontSize = 13.sp,
+                            fontFamily = Poppins,
+                            color = Color(0xFF475569),
+                            lineHeight = 20.sp
+                        )
+
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    isFlyingToBell = true
+                                    coroutineScope.launch {
+                                        delay(700)
+                                        popupVisible = false
+                                    }
+                                }
+                            ) {
+                                Text(
+                                    "Later",
+                                    color = Color.Gray,
+                                    fontFamily = Poppins,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Button(
+                                onClick = {
+                                    popupVisible = false
+
+                                    if (latestAppNotif!!.actionType == "URL") {
+                                        try {
+                                            context.startActivity(
+                                                Intent(
+                                                    Intent.ACTION_VIEW,
+                                                    Uri.parse(
+                                                        latestAppNotif!!.actionTarget
+                                                    )
+                                                )
+                                            )
+                                        } catch (_: Exception) {
+                                        }
+                                    } else if (
+                                        latestAppNotif!!.actionType == "AppSection" &&
+                                        latestAppNotif!!.actionTarget.isNotEmpty()
+                                    ) {
+                                        if (
+                                            latestAppNotif!!.type == "TicketReply" ||
+                                            latestAppNotif!!.actionTarget ==
+                                            "help_support_screen"
+                                        ) {
+                                            navController.currentBackStackEntry
+                                                ?.savedStateHandle
+                                                ?.set("fromTicketNotif", true)
+                                        }
+
+                                        navController.navigate(
+                                            latestAppNotif!!.actionTarget
+                                        ) {
+                                            launchSingleTop = true // 🔥 WHITE SCREEN BUG FIX 🔥
+                                        }
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF1664E8)
+                                )
+                            ) {
+                                Text(
+                                    "View",
+                                    color = Color.White,
+                                    fontFamily = Poppins,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun HomeDashboard(
+    userName: String,
+    banners: List<BannerModel>,
+    isBannerLoading: Boolean,
+    bannerPagerState: androidx.compose.foundation.pager.PagerState,
+    gridItemsList: List<HomeGridItem>,
+    navController: NavController,
+    onSearchClick: () -> Unit
+) {
+    val context = LocalContext.current
+
+    // 🔥 FIX: REMOVED verticalScroll() TO MAKE IT A STRICT ONE-PAGE NO-SCROLL LAYOUT 🔥
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp)
+    ) {
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // 🔥 FIX: GREETING & SEARCH PILL SCALED DOWN 🔥
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Hello, ",
+                        fontSize = 18.sp, // Reference UI size
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = Poppins,
+                        color = Color(0xFF0E1B43)
+                    )
+
+                    Text(
+                        text = userName,
+                        fontSize = 18.sp, // Reference UI size
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = Poppins,
+                        color = Color(0xFF175BEA),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Spacer(modifier = Modifier.width(5.dp))
+
+                    Text(
+                        text = "👋",
+                        fontSize = 16.sp // Reference UI size
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(2.dp))
+
+                Text(
+                    text = "Good Morning! Keep Learning, Keep Growing.",
+                    fontSize = 11.sp, // Reduced font size
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = Poppins,
+                    color = Color(0xFF61749A),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            SearchPill(
+                modifier = Modifier.fillMaxWidth(0.5f), // Adjusted width ratio
+                onClick = onSearchClick,
+                enabled = true
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // Banner section.
+        Column(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (isBannerLoading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(2.0f) // Restored original banner size
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.White),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = Color(0xFF1765E8),
+                        strokeWidth = 3.dp
+                    )
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(2.0f) // Restored original banner size
+                        .shadow(
+                            elevation = 5.dp,
+                            shape = RoundedCornerShape(20.dp),
+                            clip = false
+                        )
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Color.White)
+                ) {
+                    HorizontalPager(
+                        state = bannerPagerState,
+                        modifier = Modifier.fillMaxSize()
+                    ) { page ->
+                        if (banners.isEmpty()) {
+                            Image(
+                                painter = painterResource(
+                                    id = R.drawable.`app_logo`
+                                ),
+                                contentDescription = "Default",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(16.dp)
+                            )
+                        } else {
+                            AsyncImage(
+                                model = banners[page].imageUrl,
+                                contentDescription = banners[page].title,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clickable {
+                                        val clickedBanner = banners[page]
+
+                                        if (clickedBanner.websiteUrl.isNotEmpty()) {
+                                            var url =
+                                                clickedBanner.websiteUrl
+
+                                            if (!url.startsWith("http://") &&
+                                                !url.startsWith("https://")
+                                            ) {
+                                                url = "https://$url"
+                                            }
+
+                                            try {
+                                                val intent = Intent(
+                                                    Intent.ACTION_VIEW,
+                                                    Uri.parse(url)
+                                                )
+                                                context.startActivity(intent)
+                                            } catch (_: Exception) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "Invalid URL",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        } else if (
+                                            clickedBanner.section.isNotEmpty() &&
+                                            clickedBanner.section != "None"
+                                        ) {
+                                            // 🔥 WHITE SCREEN BUG FIX 🔥
+                                            when (clickedBanner.section) {
+                                                "Paid Courses" ->
+                                                    navController.navigate("paid_courses_list") { launchSingleTop = true }
+                                                "Free Courses" ->
+                                                    navController.navigate("free_courses_list") { launchSingleTop = true }
+                                                "Books" ->
+                                                    navController.navigate("book_category_screen") { launchSingleTop = true }
+                                                "Previous Years" ->
+                                                    navController.navigate("py_category_screen") { launchSingleTop = true }
+                                                "Documents" ->
+                                                    navController.navigate("document_screen") { launchSingleTop = true }
+                                                "Latest Result" ->
+                                                    navController.navigate("latest_result_screen") { launchSingleTop = true }
+                                                "Job Alerts" ->
+                                                    navController.navigate("job_alerts") { launchSingleTop = true }
+                                            }
+                                        }
+                                    }
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (banners.size > 1) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    repeat(banners.size) { iteration ->
+                        val isSelected = bannerPagerState.currentPage == iteration
+                        Box(
+                            modifier = Modifier
+                                .padding(horizontal = 4.dp)
+                                .clip(CircleShape)
+                                .background(if (isSelected) Color(0xFF1976D2) else Color.LightGray)
+                                .size(if (isSelected) 8.dp else 6.dp)
+                        )
+                    }
+                }
+            } else Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        val menuPages = gridItemsList.chunked(9)
+        val menuPagerState = rememberPagerState(
+            pageCount = { menuPages.size }
+        )
+
+        // 🔥 FIX: GRID MENU WILL TAKE REMAINING SPACE AUTOMATICALLY USING weight(1f) 🔥
+        HorizontalPager(
+            state = menuPagerState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f) // Expands to fit perfectly without scrolling
+        ) { pageIndex ->
+            val pageItems = menuPages[pageIndex]
+
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                for (rowIndex in 0 until 3) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f), // Rows flex equally
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        for (colIndex in 0 until 3) {
+                            val itemIndex = rowIndex * 3 + colIndex
+
+                            if (itemIndex < pageItems.size) {
+                                HomeMenuCard(
+                                    item = pageItems[itemIndex],
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight(), // Flexes to match the row
+                                    onClick = {
+                                        // 🔥 WHITE SCREEN BUG FIX FOR ALL BUTTONS 🔥
+                                        when (pageItems[itemIndex].name) {
+                                            "Paid Courses" ->
+                                                navController.navigate("paid_courses_list") { launchSingleTop = true }
+                                            "Free Courses" ->
+                                                navController.navigate("free_courses_list") { launchSingleTop = true }
+                                            "Job Alerts" ->
+                                                navController.navigate("job_alerts") { launchSingleTop = true }
+                                            "Documents" ->
+                                                navController.navigate("document_screen") { launchSingleTop = true }
+                                            "Latest Result" ->
+                                                navController.navigate("latest_result_screen") { launchSingleTop = true }
+                                            "Books" ->
+                                                navController.navigate("book_category_screen") { launchSingleTop = true }
+                                            "Previous Year" ->
+                                                navController.navigate("py_category_screen") { launchSingleTop = true }
+                                            "Online Exam (CBT)" ->
+                                                navController.navigate("online_cbt_exam") { launchSingleTop = true }
+                                            "Syllabus" ->
+                                                navController.navigate("user_syllabus_categories") { launchSingleTop = true }
+                                            "Age Calculator" ->
+                                                navController.navigate("age_calculator_screen") { launchSingleTop = true }
+                                        }
+                                    }
+                                )
+                            } else {
+                                Spacer(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (menuPages.size > 1) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                repeat(menuPages.size) { iteration ->
+                    val selected =
+                        menuPagerState.currentPage == iteration
+
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 5.dp)
+                            .size(
+                                width = if (selected) 19.dp else 8.dp,
+                                height = 8.dp
+                            )
+                            .clip(CircleShape)
+                            .background(
+                                if (selected) {
+                                    Color(0xFF1464E8)
+                                } else {
+                                    Color(0xFFB9C8DA)
+                                }
+                            )
+                    )
+                }
+            }
+        } else {
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun PremiumHomeTopBar(
+    userName: String,
+    totalActiveNotifs: Int,
+    onMenuClick: () -> Unit,
+    onNotificationClick: () -> Unit,
+    onSearchClick: () -> Unit
+) {
+    // 🔥 FIX: TOP BAR REDUCED HEIGHT FOR MORE SPACE 🔥
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(68.dp) // Compact reference height
+            .shadow(
+                elevation = 6.dp,
+                shape = RoundedCornerShape(
+                    bottomStart = 28.dp,
+                    bottomEnd = 28.dp
+                ),
+                clip = false
+            )
+            .clip(
+                RoundedCornerShape(
+                    bottomStart = 28.dp,
+                    bottomEnd = 28.dp
+                )
+            )
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xFF5CB5FF),
+                        Color(0xFF1977F2),
+                        Color(0xFF3B8EF5)
+                    )
+                )
+            )
+    ) {
+        // White center panel behind the UHQ RELATION logo.
+        // The blue header remains visible on both sides.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.56f)
+                .fillMaxHeight()
+                .align(Alignment.Center)
+                .clip(
+                    RoundedCornerShape(
+                        topStart = 0.dp,
+                        topEnd = 0.dp,
+                        bottomStart = 20.dp,
+                        bottomEnd = 20.dp
+                    )
+                )
+                .background(Color.White)
+        )
+
+        // Soft white curved layer for the same flowing header look.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(34.dp)
+                .align(Alignment.BottomCenter)
+                .clip(
+                    RoundedCornerShape(
+                        topStart = 70.dp,
+                        topEnd = 70.dp
+                    )
+                )
+                .background(Color.White.copy(alpha = 0.30f))
+        )
+
+        // Hamburger button.
+        Box(
+            modifier = Modifier
+                .padding(start = 10.dp, top = 14.dp)
+                .size(42.dp)
+                .shadow(
+                    elevation = 7.dp,
+                    shape = CircleShape
+                )
+                .clip(CircleShape)
+                .background(Color(0xFF0756B9))
+                .clickable(onClick = onMenuClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                repeat(3) {
+                    Box(
+                        modifier = Modifier
+                            .width(22.dp)
+                            .height(2.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color.White)
+                    )
+                }
+            }
+        }
+
+        // 🔥 FIX: CENTER LOGO SCALED DOWN 🔥
+        Image(
+            painter = painterResource(id = R.drawable.`app_logo`),
+            contentDescription = "UHQ Relation",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(top = 2.dp)
+                .fillMaxWidth(0.46f)
+                .height(56.dp)
+        )
+
+        // Bell + notification badge.
+        // Badge is kept OUTSIDE the clipped white bell circle so the
+        // red circle and its white border are always fully visible.
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 10.dp, top = 14.dp)
+                .size(50.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .shadow(
+                        elevation = 5.dp,
+                        shape = CircleShape
+                    )
+                    .clip(CircleShape)
+                    .background(Color.White)
+                    .clickable(onClick = onNotificationClick),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Notifications,
+                    contentDescription = "Notifications",
+                    tint = Color(0xFF143B82),
+                    modifier = Modifier.size(27.dp)
+                )
+            }
+
+            // Show the count ONLY when there are active notifications.
+            // 1 -> "1", 5 -> "5", 10 -> "10", 15 -> "15", etc.
+            if (totalActiveNotifs > 0) {
+                val badgeText = totalActiveNotifs.toString()
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = 1.dp, y = (-1).dp)
+                        .defaultMinSize(
+                            minWidth = if (totalActiveNotifs < 10) 20.dp else 24.dp,
+                            minHeight = 20.dp
+                        )
+                        .height(20.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFFF3340))
+                        .border(
+                            width = 1.5.dp,
+                            color = Color.White,
+                            shape = CircleShape
+                        )
+                        .padding(horizontal = if (totalActiveNotifs < 10) 0.dp else 5.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = badgeText,
+                        color = Color.White,
+                        fontSize = if (totalActiveNotifs > 9) 8.sp else 9.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = Poppins,
+                        maxLines = 1,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchPill(
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    enabled: Boolean = true
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val hovered by interactionSource.collectIsHoveredAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = when {
+            pressed -> 0.985f
+            hovered -> 1.01f
+            else -> 1f
+        },
+        animationSpec = tween(120),
+        label = "search_press_scale"
+    )
+
+    // 🔥 FIX: SEARCH BOX REDUCED HEIGHT 🔥
+    Box(
+        modifier = modifier
+            .height(40.dp) // Compact reference search height
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .shadow(
+                elevation = 5.dp,
+                shape = RoundedCornerShape(30.dp)
+            )
+            .clip(RoundedCornerShape(30.dp))
+            .background(Color.White)
+            .hoverable(interactionSource)
+            .clickable(
+                enabled = enabled,
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Icon(
+            imageVector = Icons.Default.Search,
+            contentDescription = "Search",
+            tint = Color(0xFF0C2460),
+            modifier = Modifier.size(18.dp)
+        )
+
+        Text(
+            text = "Search courses, exams...",
+            modifier = Modifier.padding(start = 8.dp, end = 26.dp),
+            color = Color(0xFF61749A),
+            fontSize = 9.sp, // Compact reference size
+            fontFamily = Poppins,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+
+    }
+}
+
+@Composable
+private fun HomeMenuCard(
+    item: HomeGridItem,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val hovered by interactionSource.collectIsHoveredAsState()
+
+    val scale by animateFloatAsState(
+        targetValue = when {
+            pressed -> 0.965f
+            hovered -> 1.015f
+            else -> 1f
+        },
+        animationSpec = tween(
+            durationMillis = 140,
+            easing = FastOutSlowInEasing
+        ),
+        label = "menu_card_scale"
+    )
+
+    val elevation by animateDpAsState(
+        targetValue = if (pressed) 1.dp else 5.dp,
+        animationSpec = tween(140),
+        label = "menu_card_elevation"
+    )
+
+    val arrowScale by animateFloatAsState(
+        targetValue = if (pressed) 0.90f else 1f,
+        animationSpec = tween(140),
+        label = "menu_arrow_scale"
+    )
+
+    Box(
+        modifier = modifier
+            // Removed fixed height, it expands naturally inside the Row
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .shadow(
+                elevation = elevation,
+                shape = RoundedCornerShape(20.dp)
+            )
+            .clip(RoundedCornerShape(20.dp))
+            .hoverable(interactionSource)
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(
+                        item.cardStart,
+                        item.cardEnd
+                    )
+                )
+            )
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .padding(10.dp) // Uniform padding
+    ) {
+        // Decorative translucent circles dynamically positioned.
+        Box(
+            modifier = Modifier
+                .size(60.dp)
+                .align(Alignment.TopEnd)
+                .offset(x = 20.dp, y = (-20).dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.16f))
+        )
+
+        Box(
+            modifier = Modifier
+                .size(50.dp)
+                .align(Alignment.BottomEnd)
+                .offset(x = 10.dp, y = 10.dp)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.13f))
+        )
+
+        // Icon circle.
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .size(50.dp) // Reference-sized menu icon circle
+                .shadow(
+                    elevation = 4.dp,
+                    shape = CircleShape
+                )
+                .clip(CircleShape)
+                .background(
+                    when (item.name) {
+                        "Paid Courses" -> Color(0xFF1269EF)
+                        "Free Courses" -> Color(0xFF05A96C)
+                        "Job Alerts" -> Color(0xFFFF5C14)
+                        "Latest Result" -> Color(0xFFF40C58)
+                        "Documents" -> Color(0xFF6B13E9)
+                        "Books" -> Color(0xFF1269EF)
+                        "Online Exam (CBT)" -> Color(0xFFFF3F36)
+                        "Age Calculator" -> Color(0xFF0BA875)
+                        else -> Color(0xFFFFA80B)
+                    }
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (item.iconVector != null) {
+                Icon(
+                    imageVector = item.iconVector,
+                    contentDescription = null,
+                    tint = item.color,
+                    modifier = Modifier.size(28.dp)
+                )
+            } else if (item.iconRes != null) {
+                Image(
+                    painter = painterResource(id = item.iconRes),
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
+        }
+
+        // 🔥 FIX: FULL TEXT LOGIC (maxLines = 2 handles "Paid Courses") 🔥
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(end = 24.dp)
+        ) {
+            Text(
+                text = item.name,
+                fontSize = 11.sp, // Adjusted to fit 2 lines perfectly
+                lineHeight = 13.sp,
+                fontWeight = FontWeight.ExtraBold,
+                fontFamily = Poppins,
+                color = Color(0xFF0C2457),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Spacer(modifier = Modifier.height(1.dp))
+
+            Text(
+                text = item.subtitle,
+                fontSize = 8.sp,
+                lineHeight = 10.sp,
+                fontWeight = FontWeight.Medium,
+                fontFamily = Poppins,
+                color = Color(0xFF193A72),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        // Circular arrow button.
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .size(28.dp)
+                .graphicsLayer {
+                    scaleX = arrowScale
+                    scaleY = arrowScale
+                }
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.34f))
+                .border(
+                    width = 1.dp,
+                    color = Color.White.copy(alpha = 0.70f),
+                    shape = CircleShape
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = Color(0xFF0B2B68),
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun PremiumBottomBar(
+    selectedTab: String,
+    hasNotification: Boolean,
+    onTabSelected: (String) -> Unit
+) {
+    val tabs = listOf(
+        Triple("Home", Icons.Default.Home, "Home"),
+        Triple("Updates", Icons.Default.NewReleases, "Updates"),
+        Triple("Purchases", Icons.Default.ShoppingBag, "Purchases"),
+        Triple("Downloads", Icons.Default.Download, "Downloads")
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(
+                start = 16.dp,
+                end = 16.dp,
+                bottom = 10.dp
+            )
+            .height(88.dp)
+            .shadow(
+                elevation = 9.dp,
+                shape = RoundedCornerShape(36.dp)
+            )
+            .clip(RoundedCornerShape(36.dp))
+            .background(Color.White)
+    ) {
+        // 🔥 FIX: BLUE LINE HAS BEEN REMOVED HERE 🔥
+
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            tabs.forEachIndexed { index, (label, icon, route) ->
+                val selected = selectedTab == route
+
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (index > 0) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .width(1.dp)
+                                .height(42.dp)
+                                .background(Color(0xFFDCE3EC))
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .clickable {
+                                onTabSelected(route)
+                            },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.TopEnd
+                        ) {
+                            Icon(
+                                imageVector = icon,
+                                contentDescription = label,
+                                tint = if (selected) {
+                                    Color(0xFF1264EA)
+                                } else {
+                                    Color(0xFF687A97)
+                                },
+                                modifier = Modifier.size(
+                                    if (selected) 33.dp else 30.dp
+                                )
+                            )
+
+                            if (label == "Updates" && hasNotification) {
+                                Box(
+                                    modifier = Modifier
+                                        .offset(x = 7.dp, y = (-3).dp)
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFFFF3340))
+                                        .border(
+                                            width = 1.5.dp,
+                                            color = Color.White,
+                                            shape = CircleShape
+                                        )
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(3.dp))
+
+                        Text(
+                            text = label,
+                            fontFamily = Poppins,
+                            fontSize = 12.sp,
+                            fontWeight = if (selected) {
+                                FontWeight.Bold
+                            } else {
+                                FontWeight.Medium
+                            },
+                            color = if (selected) {
+                                Color(0xFF1264EA)
+                            } else {
+                                Color(0xFF687A97)
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(5.dp))
+
+                        Box(
+                            modifier = Modifier
+                                .height(5.dp)
+                                .width(
+                                    if (selected) {
+                                        58.dp
+                                    } else {
+                                        0.dp
+                                    }
+                                )
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFF1264EA))
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
